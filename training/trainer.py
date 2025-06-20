@@ -117,6 +117,8 @@ class CheckpointConf:
     initialize_after_preemption: Optional[bool] = None
     # if not None, training will be resumed from this checkpoint
     resume_from: Optional[str] = None
+    # New parameter to control checkpoint saving frequency (defaults to 1 for backward compatibility)
+    checkpoint_save_freq: int = 1
 
     def infer_missing(self):
         if self.initialize_after_preemption is None:
@@ -136,6 +138,8 @@ class LoggingConf:
     log_visual_frequency: int = 100
     scalar_keys_to_log: Optional[Dict[str, Any]] = None
     log_batch_stats: bool = False
+    enable_bbox_visualization: bool = False
+    enable_mask_overlay: bool = True
 
 
 class Trainer:
@@ -481,6 +485,10 @@ class Trainer:
                 self.steps[phase],
             )
 
+        # Log visual samples periodically
+        if self.steps[phase] % self.logging_conf.log_visual_frequency == 0:
+            self._log_visual_samples(batch, outputs, phase, self.steps[phase])
+
         self.steps[phase] += 1
 
         ret_tuple = {loss_str: loss}, batch_size, step_losses
@@ -495,6 +503,267 @@ class Trainer:
                     )
 
         return ret_tuple
+
+    def _log_visual_samples(self, batch: BatchedVideoDatapoint, outputs: Dict, phase: str, step: int):
+        """Log visual samples including images, ground truth masks, and predictions."""
+        if not hasattr(self, 'logger') or self.logger is None:
+            return
+        
+        # Only log visual samples during validation phase
+        if phase != "val":
+            return
+            
+        try:
+            # img_batch shape is [TxBxCxHxW] where T=1 for single images, B=batch_size
+            img_batch = batch.img_batch  # [T, B, C, H, W]
+            
+            # Get first frame (T=0) and first sample in batch (B=0)
+            img = img_batch[0, 0]  # [C, H, W]
+            
+            # Get ground truth mask - masks shape is [TxOxHxW] where O=num_objects
+            gt_mask = None
+            if batch.masks is not None:
+                # Get first frame (T=0) and first object (O=0)
+                gt_mask = batch.masks[0, 0]  # [H, W]
+                
+            # Denormalize image for visualization
+            img_viz = self._denormalize_image(img)
+            
+            # Log original image
+            self.logger.log_image(f"Samples/{phase}/image", img_viz, step, dataformats='CHW')
+            
+            
+            # Log ground truth mask if available
+            if gt_mask is not None:
+                mask_viz = self._prepare_mask_for_logging(gt_mask)
+                self.logger.log_image(f"Samples/{phase}/gt_mask", mask_viz, step, dataformats='HW')
+                
+                # Log mask overlay on image (red mask overlay) if enabled
+                if getattr(self.logging_conf, 'enable_mask_overlay', True):
+                    overlay_viz = self._create_overlay_visualization(img_viz, mask_viz)
+                    self.logger.log_image(f"Samples/{phase}/image_with_mask_overlay", overlay_viz, step, dataformats='CHW')
+            
+            # Handle different output structures
+            if isinstance(outputs, dict):
+                # Try different possible keys for predicted masks
+                pred_keys_to_try = [
+                    'multistep_pred_multimasks_high_res',
+                    'pred_masks', 
+                    'pred_multimasks',
+                    'masks',
+                    'multimasks',
+                    'pred_masks_high_res'
+                ]
+                
+                pred_masks_found = False
+                for key in pred_keys_to_try:
+                    if key in outputs and outputs[key] is not None:
+                        pred_masks_data = outputs[key]
+                        
+                        # Handle different data structures
+                        if isinstance(pred_masks_data, list) and len(pred_masks_data) > 0:
+                            pred_masks = pred_masks_data[-1]  # Last step predictions
+                        else:
+                            pred_masks = pred_masks_data
+                        
+                        # Extract the mask for logging
+                        if len(pred_masks.shape) == 4:  # [N, M, H, W]
+                            pred_mask = pred_masks[0, 0]  # [H, W]
+                        elif len(pred_masks.shape) == 3:  # [N, H, W]  
+                            pred_mask = pred_masks[0]  # [H, W]
+                        else:
+                            pred_mask = pred_masks
+                        
+                        pred_viz = self._prepare_mask_for_logging(pred_mask)
+                        self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
+                        
+                        # Log predicted mask overlay on image (red mask overlay) if enabled
+                        if getattr(self.logging_conf, 'enable_mask_overlay', True):
+                            pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                            self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
+                        
+                        pred_masks_found = True
+                        break
+                    
+            elif isinstance(outputs, list):
+                # For list outputs, try to find predicted masks in the elements
+                for i, output_item in enumerate(outputs):
+                    if isinstance(output_item, dict):
+                        # Try to find predicted masks in this dictionary
+                        pred_keys_to_try = [
+                            'multistep_pred_multimasks_high_res',
+                            'pred_masks_high_res',
+                            'multistep_pred_masks_high_res',
+                            'pred_masks', 
+                            'pred_multimasks',
+                            'masks',
+                            'multimasks'
+                        ]
+                        
+                        for key in pred_keys_to_try:
+                            if key in output_item and output_item[key] is not None:
+                                pred_masks_data = output_item[key]
+                                
+                                # Handle different data structures
+                                if isinstance(pred_masks_data, list) and len(pred_masks_data) > 0:
+                                    pred_masks = pred_masks_data[-1]  # Last step predictions
+                                else:
+                                    pred_masks = pred_masks_data
+                                
+                                # Extract the mask for logging
+                                if len(pred_masks.shape) == 4:  # [N, M, H, W]
+                                    pred_mask = pred_masks[0, 0]  # [H, W]
+                                elif len(pred_masks.shape) == 3:  # [N, H, W]  
+                                    pred_mask = pred_masks[0]  # [H, W]
+                                else:
+                                    pred_mask = pred_masks
+                                
+                                pred_viz = self._prepare_mask_for_logging(pred_mask)
+                                self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
+                                
+                                # Log predicted mask overlay on image (red mask overlay) if enabled
+                                if getattr(self.logging_conf, 'enable_mask_overlay', True):
+                                    pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                                    self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
+                                
+                                return  # Exit early since we found and logged the mask
+                        
+                    elif hasattr(output_item, 'shape'):
+                        # This might be a predicted mask tensor directly
+                        try:
+                            if len(output_item.shape) >= 2:  # At least 2D
+                                pred_mask = output_item
+                                if len(pred_mask.shape) == 4:  # [N, M, H, W]
+                                    pred_mask = pred_mask[0, 0]  # [H, W]
+                                elif len(pred_mask.shape) == 3:  # [N, H, W]  
+                                    pred_mask = pred_mask[0]  # [H, W]
+                                
+                                pred_viz = self._prepare_mask_for_logging(pred_mask)
+                                self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
+                                
+                                # Log predicted mask overlay on image (red mask overlay) if enabled
+                                if getattr(self.logging_conf, 'enable_mask_overlay', True):
+                                    pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                                    self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
+                                
+                                break
+                        except Exception as e:
+                            pass
+            
+            # Original code for backwards compatibility (skip this since outputs might not be dict)
+            if isinstance(outputs, dict) and 'multistep_pred_multimasks_high_res' in outputs and outputs['multistep_pred_multimasks_high_res'] is not None:
+                pred_masks_list = outputs['multistep_pred_multimasks_high_res']
+                
+                # Get the last prediction step (usually the best)
+                if len(pred_masks_list) > 0:
+                    pred_masks = pred_masks_list[-1]  # Last step predictions
+                    
+                    # pred_masks should be [N, M, H, W] where N=batch_size, M=num_masks_per_object
+                    # Take first sample in batch and first mask
+                    if len(pred_masks.shape) == 4:  # [N, M, H, W]
+                        pred_mask = pred_masks[0, 0]  # [H, W]
+                    elif len(pred_masks.shape) == 3:  # [N, H, W]  
+                        pred_mask = pred_masks[0]  # [H, W]
+                    else:
+                        pred_mask = pred_masks
+                    
+                    pred_viz = self._prepare_mask_for_logging(pred_mask)
+                    self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
+                    
+                    # Log predicted mask overlay on image (red mask overlay) if enabled
+                    if getattr(self.logging_conf, 'enable_mask_overlay', True):
+                        pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                        self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
+                
+        except Exception as e:
+            logging.warning(f"Failed to log visual samples - img_batch shape: {batch.img_batch.shape if hasattr(batch.img_batch, 'shape') else 'unknown'}, masks shape: {batch.masks.shape if batch.masks is not None and hasattr(batch.masks, 'shape') else 'unknown'}, error: {e}")
+
+    def _denormalize_image(self, img: torch.Tensor) -> torch.Tensor:
+        """Denormalize image tensor for visualization."""
+        # ImageNet normalization values
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(img.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(img.device)
+        img_denorm = img * std + mean
+        # Clamp to valid range
+        return torch.clamp(img_denorm, 0, 1)
+
+    def _prepare_mask_for_logging(self, mask: torch.Tensor) -> torch.Tensor:
+        """Prepare mask tensor for logging."""
+        if mask.dim() > 2:
+            # Take the first mask if there are multiple
+            mask = mask[0] if mask.dim() == 3 else mask.squeeze()
+        
+        # Convert boolean masks to float
+        if mask.dtype == torch.bool:
+            mask_viz = mask.float()
+        else:
+            mask_viz = mask.float()
+            # Normalize to 0-1 range if needed
+            if mask_viz.max() > 1:
+                mask_viz = mask_viz / mask_viz.max()
+        return mask_viz
+
+    def _create_overlay_visualization(self, img: torch.Tensor, mask: torch.Tensor, alpha=0.4) -> torch.Tensor:
+        """Create an overlay of image and mask with red mask overlay for TensorBoard.
+        
+        Args:
+            img: Image tensor of shape [C, H, W] in range [0, 1]
+            mask: Mask tensor of shape [H, W] in range [0, 1]
+            alpha: Transparency of mask overlay (default: 0.4)
+            
+        Returns:
+            torch.Tensor: Image with red mask overlay of shape [C, H, W]
+        """
+        try:
+            # Ensure image is in correct format [C, H, W]
+            if img.dim() == 4:
+                img = img[0]  # Remove batch dimension if present
+            if img.dim() != 3:
+                return img
+                
+            # Ensure mask is 2D [H, W]
+            if mask.dim() > 2:
+                mask = mask.squeeze()
+            if mask.dim() != 2:
+                return img
+                
+            # Resize mask to match image if needed
+            if mask.shape != img.shape[-2:]:
+                import torch.nn.functional as F
+                mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=img.shape[-2:], mode='nearest').squeeze()
+            
+            # Normalize mask to [0, 1] range
+            if mask.max() > 1:
+                mask = mask / mask.max()
+            
+            # Convert mask to same device as image
+            mask = mask.to(img.device)
+            
+            # Create overlay
+            overlay = img.clone()
+            
+            # Handle grayscale images by converting to RGB
+            if img.shape[0] == 1:
+                overlay = overlay.repeat(3, 1, 1)
+            elif img.shape[0] != 3:
+                return img  # Unexpected number of channels
+            
+            # Apply red mask overlay where mask is present
+            # Red color overlay: enhance red channel, reduce green and blue
+            overlay[0] = overlay[0] * (1 - alpha * mask) + alpha * mask  # Red channel enhanced
+            overlay[1] = overlay[1] * (1 - alpha * mask)  # Green channel dimmed
+            overlay[2] = overlay[2] * (1 - alpha * mask)  # Blue channel dimmed
+            
+            # Clamp values to [0, 1]
+            overlay = torch.clamp(overlay, 0, 1)
+            
+            return overlay
+            
+        except Exception as e:
+            logging.warning(f"Overlay visualization failed: {e}")
+            # Return original image if overlay fails
+            return img
+
 
     def run(self):
         assert self.mode in ["train", "train_only", "val"]
@@ -540,8 +809,13 @@ class Trainer:
                 ) as f:
                     f.write(json.dumps(outs) + "\n")
 
-            # Save checkpoint before validating
-            self.save_checkpoint(self.epoch + 1)
+            # Save checkpoint before validating (based on checkpoint_save_freq)
+            # Always save on the last epoch, or when the epoch is divisible by checkpoint_save_freq
+            if (self.epoch + 1) % self.checkpoint_conf.checkpoint_save_freq == 0 or (self.epoch + 1) == self.max_epochs:
+                logging.info(f"Saving checkpoint at epoch {self.epoch + 1} (checkpoint_save_freq={self.checkpoint_conf.checkpoint_save_freq})")
+                self.save_checkpoint(self.epoch + 1)
+            else:
+                logging.info(f"Skipping checkpoint save at epoch {self.epoch + 1} (next save at epoch {((self.epoch + 1) // self.checkpoint_conf.checkpoint_save_freq + 1) * self.checkpoint_conf.checkpoint_save_freq})")
 
             del dataloader
             gc.collect()

@@ -178,6 +178,11 @@ class SAM2Train(SAM2Base):
             rand_frames_to_correct = self.rand_frames_to_correct_for_eval
             num_init_cond_frames = self.num_init_cond_frames_for_eval
             rand_init_cond_frames = self.rand_init_cond_frames_for_eval
+        # Check if we have bbox prompts available for all frames
+        bbox_prompts_available = (hasattr(input, 'bbox_prompts') and 
+                                input.bbox_prompts is not None and 
+                                input.bbox_prompts.shape[0] >= num_frames)
+        
         if num_frames == 1:
             # here we handle a special case for mixing video + SAM on image training,
             # where we force using point input for the SAM task on static images
@@ -185,8 +190,14 @@ class SAM2Train(SAM2Base):
             num_frames_to_correct = 1
             num_init_cond_frames = 1
         assert num_init_cond_frames >= 1
-        # (here `self.rng.random()` returns value in range 0.0 <= X < 1.0)
-        use_pt_input = self.rng.random() < prob_to_use_pt_input
+        
+        # If bbox prompts are available, always use point input (which includes bbox)
+        # Otherwise use the configured probability
+        if bbox_prompts_available:
+            use_pt_input = True
+        else:
+            # (here `self.rng.random()` returns value in range 0.0 <= X < 1.0)
+            use_pt_input = self.rng.random() < prob_to_use_pt_input
         if rand_init_cond_frames and num_init_cond_frames > 1:
             # randomly select 1 to `num_init_cond_frames` frames as initial conditioning frames
             num_init_cond_frames = self.rng.integers(
@@ -225,12 +236,47 @@ class SAM2Train(SAM2Base):
             if not use_pt_input:
                 backbone_out["mask_inputs_per_frame"][t] = gt_masks_per_frame[t]
             else:
-                # During training # P(box) = prob_to_use_pt_input * prob_to_use_box_input
-                use_box_input = self.rng.random() < prob_to_use_box_input
+                # Check if we have actual bbox prompts from annotations first
+                if (hasattr(input, 'bbox_prompts') and 
+                    input.bbox_prompts is not None and 
+                    t < input.bbox_prompts.shape[0]):
+                    # Always use bbox prompts when available
+                    use_box_input = True
+                else:
+                    # Fallback to probability-based bbox usage when no bbox prompts available
+                    use_box_input = self.rng.random() < prob_to_use_box_input
+                
                 if use_box_input:
-                    points, labels = sample_box_points(
-                        gt_masks_per_frame[t],
-                    )
+                    # Check if we have actual bbox prompts from annotations
+                    if (hasattr(input, 'bbox_prompts') and 
+                        input.bbox_prompts is not None and 
+                        t < input.bbox_prompts.shape[0]):
+                        
+                        # Use actual bbox prompts from Brazil mask annotations
+                        bbox_coords = input.bbox_prompts[t]  # [O, 4] where O is number of objects
+                        
+                        # Convert bbox coordinates to point format for SAM2
+                        batch_size = bbox_coords.shape[0]
+                        points = torch.zeros(batch_size, 2, 2, device=bbox_coords.device)  # [B, 2, 2]
+                        labels = torch.full((batch_size, 2), 2, device=bbox_coords.device)  # [B, 2]
+                        
+                        for i in range(batch_size):
+                            bbox = bbox_coords[i]  # [4] - [x1, y1, x2, y2]
+                            # Top-left corner
+                            points[i, 0, 0] = bbox[0]  # x1
+                            points[i, 0, 1] = bbox[1]  # y1
+                            # Bottom-right corner
+                            points[i, 1, 0] = bbox[2]  # x2
+                            points[i, 1, 1] = bbox[3]  # y2
+                        
+                        # Set labels: 2 for top-left, 3 for bottom-right
+                        labels[:, 0] = 2  # top-left
+                        labels[:, 1] = 3  # bottom-right
+                    else:
+                        # Fallback: generate bbox from ground truth masks (original behavior)
+                        points, labels = sample_box_points(
+                            gt_masks_per_frame[t],
+                        )
                 else:
                     # (here we only sample **one initial point** on initial conditioning frames from the
                     # ground-truth mask; we may sample more correction points on the fly)

@@ -27,9 +27,47 @@ from training.utils.data_utils import VideoDatapoint
 def hflip(datapoint, index):
 
     datapoint.frames[index].data = F.hflip(datapoint.frames[index].data)
+    
+    # Get image width for bbox coordinate transformation
+    img_width = datapoint.frames[index].size[1]  # (height, width)
+    
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
             obj.segment = F.hflip(obj.segment)
+        
+        # Transform bbox coordinates for horizontal flip
+        if obj.bbox is not None:
+            import torch
+            if isinstance(obj.bbox, torch.Tensor):
+                x_min, y_min, x_max, y_max = obj.bbox
+                # For horizontal flip: new_x = width - old_x
+                new_x_min = img_width - x_max
+                new_x_max = img_width - x_min
+                obj.bbox = torch.tensor([new_x_min, y_min, new_x_max, y_max], dtype=obj.bbox.dtype)
+
+    return datapoint
+
+
+def vflip(datapoint, index):
+
+    datapoint.frames[index].data = F.vflip(datapoint.frames[index].data)
+    
+    # Get image height for bbox coordinate transformation
+    img_height = datapoint.frames[index].size[0]  # (height, width)
+    
+    for obj in datapoint.frames[index].objects:
+        if obj.segment is not None:
+            obj.segment = F.vflip(obj.segment)
+        
+        # Transform bbox coordinates for vertical flip
+        if obj.bbox is not None:
+            import torch
+            if isinstance(obj.bbox, torch.Tensor):
+                x_min, y_min, x_max, y_max = obj.bbox
+                # For vertical flip: new_y = height - old_y
+                new_y_min = img_height - y_max
+                new_y_max = img_height - y_min
+                obj.bbox = torch.tensor([x_min, new_y_min, x_max, new_y_max], dtype=obj.bbox.dtype)
 
     return datapoint
 
@@ -92,9 +130,28 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
         else datapoint.frames[index].data.size
     )
 
+    # Calculate scale factors for bbox transformation
+    old_w, old_h = old_size
+    new_w, new_h = size
+    scale_x = new_w / old_w
+    scale_y = new_h / old_h
+
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
             obj.segment = F.resize(obj.segment[None, None], size).squeeze()
+        
+        # Transform bbox coordinates if present
+        if obj.bbox is not None:
+            # bbox format: [x_min, y_min, x_max, y_max]
+            import torch
+            if isinstance(obj.bbox, torch.Tensor):
+                x_min, y_min, x_max, y_max = obj.bbox
+                # Scale coordinates to new image size
+                new_x_min = x_min * scale_x
+                new_y_min = y_min * scale_y
+                new_x_max = x_max * scale_x
+                new_y_max = y_max * scale_y
+                obj.bbox = torch.tensor([new_x_min, new_y_min, new_x_max, new_y_max], dtype=obj.bbox.dtype)
 
     h, w = size
     datapoint.frames[index].size = (h, w)
@@ -134,6 +191,25 @@ def pad(datapoint, index, padding, v2=False):
                     obj.segment = F.pad(obj.segment, (0, 0, padding[0], padding[1]))
                 else:
                     obj.segment = F.pad(obj.segment, tuple(padding))
+        
+        # Transform bbox coordinates if present
+        if obj.bbox is not None:
+            import torch
+            if isinstance(obj.bbox, torch.Tensor):
+                x_min, y_min, x_max, y_max = obj.bbox
+                if len(padding) == 2:
+                    # Only right and bottom padding: (left=0, top=0, right=padding[0], bottom=padding[1])
+                    # No change needed for coordinates as we only pad bottom-right
+                    pass
+                else:
+                    # left, top, right, bottom padding
+                    left_pad, top_pad = padding[0], padding[1]
+                    # Shift coordinates by left and top padding
+                    new_x_min = x_min + left_pad
+                    new_y_min = y_min + top_pad
+                    new_x_max = x_max + left_pad
+                    new_y_max = y_max + top_pad
+                    obj.bbox = torch.tensor([new_x_min, new_y_min, new_x_max, new_y_max], dtype=obj.bbox.dtype)
     return datapoint
 
 
@@ -151,6 +227,23 @@ class RandomHorizontalFlip:
         for i in range(len(datapoint.frames)):
             if random.random() < self.p:
                 datapoint = hflip(datapoint, i)
+        return datapoint
+
+
+class RandomVerticalFlip:
+    def __init__(self, consistent_transform, p=0.5):
+        self.p = p
+        self.consistent_transform = consistent_transform
+
+    def __call__(self, datapoint, **kwargs):
+        if self.consistent_transform:
+            if random.random() < self.p:
+                for i in range(len(datapoint.frames)):
+                    datapoint = vflip(datapoint, i)
+            return datapoint
+        for i in range(len(datapoint.frames)):
+            if random.random() < self.p:
+                datapoint = vflip(datapoint, i)
         return datapoint
 
 
@@ -525,4 +618,81 @@ class RandomMosaicVideoAPI:
                 should_hflip=should_hflip,
             )
 
+        return datapoint
+
+
+class Random90DegreeRotation:
+    """
+    Randomly rotate images and masks by 0, 90, 180, or 270 degrees.
+    This preserves the square format without creating black borders.
+    """
+    def __init__(self, consistent_transform=True, image_mean=(123, 116, 103)):
+        self.consistent_transform = consistent_transform
+        self.angles = [0, 90, 180, 270]
+        self.fill_img = image_mean
+    
+    def __call__(self, datapoint: VideoDatapoint, **kwargs):
+        if self.consistent_transform:
+            # Use same rotation for all frames
+            angle = random.choice(self.angles)
+        
+        for img_idx, img in enumerate(datapoint.frames):
+            if not self.consistent_transform:
+                # Different rotation for each frame
+                angle = random.choice(self.angles)
+            
+            # Skip if no rotation needed
+            if angle == 0:
+                continue
+            
+            # Get image dimensions for affine transform
+            _, height, width = F.get_dimensions(img.data)
+            img_size = [width, height]
+            
+            # Create affine parameters for rotation using PyTorch's get_params
+            # This ensures exact same transformation is applied to both image and masks
+            affine_params = T.RandomAffine.get_params(
+                degrees=[angle, angle],  # Fixed angle (no randomness)
+                translate=None,
+                scale_ranges=None,
+                shears=None,
+                img_size=img_size,
+            )
+            
+            # Apply same affine transformation to image and masks
+            img.data = F.affine(
+                img.data,
+                *affine_params,
+                interpolation=InterpolationMode.BILINEAR,
+                fill=self.fill_img,
+            )
+            
+            # Process masks with exact same affine parameters
+            this_masks = [
+                obj.segment.unsqueeze(0) if obj.segment is not None else None
+                for obj in img.objects
+            ]
+            
+            transformed_masks = []
+            for i in range(len(img.objects)):
+                if this_masks[i] is None:
+                    transformed_masks.append(None)
+                else:
+                    # Use same affine params with NEAREST interpolation for masks
+                    transformed_mask = F.affine(
+                        this_masks[i],
+                        *affine_params,
+                        interpolation=InterpolationMode.NEAREST,
+                        fill=0.0,
+                    )
+                    # Check if mask was lost during rotation
+                    if img_idx == 0 and transformed_mask.max() == 0:
+                        # Object disappeared in first frame, return unmodified datapoint
+                        return datapoint
+                    transformed_masks.append(transformed_mask.squeeze())
+            
+            # Apply transformed masks back to objects
+            for i in range(len(img.objects)):
+                img.objects[i].segment = transformed_masks[i]
+        
         return datapoint

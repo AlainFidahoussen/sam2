@@ -8,6 +8,7 @@
 import atexit
 import functools
 import logging
+import os
 import sys
 import uuid
 from typing import Any, Dict, Optional, Union
@@ -16,6 +17,8 @@ from hydra.utils import instantiate
 
 from iopath.common.file_io import g_pathmgr
 from numpy import ndarray
+import numpy as np
+import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
@@ -148,6 +151,45 @@ class TensorBoardLogger(TensorBoardWriterWrapper):
             return
         self._writer.add_hparams(hparams, meters)
 
+    def log_image(self, name: str, image: Union[torch.Tensor, np.ndarray], step: int, dataformats: str = 'CHW') -> None:
+        """Add image data to TensorBoard.
+        
+        Args:
+            name (str): tag name used to group images
+            image (Tensor/ndarray): image data to log
+            step (int): step value to record
+            dataformats (str): image data format ('CHW', 'HWC', 'HW')
+        """
+        if not self._writer:
+            return
+        self._writer.add_image(name, image, global_step=step, dataformats=dataformats)
+
+    def log_images(self, name: str, images: Union[torch.Tensor, np.ndarray], step: int, dataformats: str = 'NCHW') -> None:
+        """Add batch of images to TensorBoard.
+        
+        Args:
+            name (str): tag name used to group images
+            images (Tensor/ndarray): batch of images to log
+            step (int): step value to record
+            dataformats (str): image data format ('NCHW', 'NHWC')
+        """
+        if not self._writer:
+            return
+        self._writer.add_images(name, images, global_step=step, dataformats=dataformats)
+
+    def log_figure(self, name: str, figure, step: int, close: bool = True) -> None:
+        """Add matplotlib figure to TensorBoard.
+        
+        Args:
+            name (str): tag name
+            figure: matplotlib figure
+            step (int): step value to record
+            close (bool): whether to close figure after logging
+        """
+        if not self._writer:
+            return
+        self._writer.add_figure(name, figure, global_step=step, close=close)
+
 
 class Logger:
     """
@@ -174,6 +216,18 @@ class Logger:
         if self.tb_logger:
             self.tb_logger.log_hparams(hparams, meters)
 
+    def log_image(self, name: str, image: Union[torch.Tensor, np.ndarray], step: int, dataformats: str = 'CHW') -> None:
+        if self.tb_logger:
+            self.tb_logger.log_image(name, image, step, dataformats)
+
+    def log_images(self, name: str, images: Union[torch.Tensor, np.ndarray], step: int, dataformats: str = 'NCHW') -> None:
+        if self.tb_logger:
+            self.tb_logger.log_images(name, images, step, dataformats)
+
+    def log_figure(self, name: str, figure, step: int, close: bool = True) -> None:
+        if self.tb_logger:
+            self.tb_logger.log_figure(name, figure, step, close)
+
 
 # cache the opened file object, so that different calls to `setup_logger`
 # with the same file name can safely write to the same file.
@@ -198,6 +252,9 @@ def setup_logging(
     Setup various logging streams: stdout and file handlers.
     For file handlers, we only setup for the master gpu.
     """
+    # Disable colored output
+    os.environ["NO_COLOR"] = "1"
+    
     # get the filename if we want to log to the file as well
     log_filename = None
     if output_dir:

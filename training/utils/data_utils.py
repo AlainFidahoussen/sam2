@@ -48,8 +48,9 @@ class BatchedVideoDatapoint:
     obj_to_frame_idx: torch.IntTensor
     masks: torch.BoolTensor
     metadata: BatchedVideoMetaData
-
     dict_key: str
+    # Bounding boxes [TxOx4] containing [x1, y1, x2, y2] for each object (optional)
+    bbox_prompts: Optional[torch.FloatTensor] = None
 
     def pin_memory(self, device=None):
         return self.apply(torch.Tensor.pin_memory, device=device)
@@ -94,6 +95,8 @@ class Object:
     # Index of the frame in the media (0 if single image)
     frame_index: int
     segment: Union[torch.Tensor, dict]  # RLE dict or binary mask
+    # Bounding box coordinates [x1, y1, x2, y2] (optional)
+    bbox: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -131,6 +134,7 @@ def collate_fn(
     step_t_frame_orig_size = [[] for _ in range(T)]
 
     step_t_masks = [[] for _ in range(T)]
+    step_t_bbox_prompts = [[] for _ in range(T)]
     step_t_obj_to_frame_idx = [
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
@@ -147,6 +151,14 @@ def collate_fn(
                     torch.tensor([t, video_idx], dtype=torch.int)
                 )
                 step_t_masks[t].append(obj.segment.to(torch.bool))
+                
+                # Handle bbox prompts
+                if obj.bbox is not None:
+                    step_t_bbox_prompts[t].append(obj.bbox.to(torch.float))
+                else:
+                    # If no bbox available, create empty tensor or skip
+                    step_t_bbox_prompts[t].append(torch.zeros(4, dtype=torch.float))
+                
                 step_t_objects_identifier[t].append(
                     torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
                 )
@@ -160,6 +172,15 @@ def collate_fn(
         dim=0,
     )
     masks = torch.stack([torch.stack(masks, dim=0) for masks in step_t_masks], dim=0)
+    
+    # Stack bbox prompts if any exist
+    bbox_prompts = None
+    if any(step_t_bbox_prompts):
+        try:
+            bbox_prompts = torch.stack([torch.stack(bboxes, dim=0) for bboxes in step_t_bbox_prompts], dim=0)
+        except Exception as e:
+            bbox_prompts = None
+    
     objects_identifier = torch.stack(
         [torch.stack(id, dim=0) for id in step_t_objects_identifier], dim=0
     )
@@ -170,6 +191,7 @@ def collate_fn(
         img_batch=img_batch,
         obj_to_frame_idx=obj_to_frame_idx,
         masks=masks,
+        bbox_prompts=bbox_prompts,
         metadata=BatchedVideoMetaData(
             unique_objects_identifier=objects_identifier,
             frame_orig_size=frame_orig_size,

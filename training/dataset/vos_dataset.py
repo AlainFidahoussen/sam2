@@ -101,6 +101,14 @@ class VOSDataset(VisionDataset):
                 )
             else:
                 segments = segment_loader.load(frame.frame_idx)
+            # Load bbox information if available
+            bboxes = {}
+            if hasattr(segment_loader, 'load_bbox'):
+                try:
+                    bboxes = segment_loader.load_bbox(frame.frame_idx)
+                except Exception as e:
+                    bboxes = {}
+            
             for obj_id in sampled_object_ids:
                 # Extract the segment
                 if obj_id in segments:
@@ -115,11 +123,15 @@ class VOSDataset(VisionDataset):
                         continue
                     segment = torch.zeros(h, w, dtype=torch.uint8)
 
+                # Extract bbox if available
+                bbox = bboxes.get(obj_id, None)
+
                 images[frame_idx].objects.append(
                     Object(
                         object_id=obj_id,
                         frame_index=frame.frame_idx,
                         segment=segment,
+                        bbox=bbox,
                     )
                 )
         return VideoDatapoint(
