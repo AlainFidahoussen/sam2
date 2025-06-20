@@ -28,6 +28,10 @@ vos:
           sizes: ${scratch.resolution}
           square: true
           consistent_transform: True
+        - _target_: training.dataset.transforms.RandomAffine
+          degrees: 0
+          translate: [0.05, 0.05]
+          consistent_transform: True
         - _target_: training.dataset.transforms.RandomHorizontalFlip
           consistent_transform: True
         - _target_: training.dataset.transforms.RandomVerticalFlip

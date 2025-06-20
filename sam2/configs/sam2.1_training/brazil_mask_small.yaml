@@ -24,22 +24,20 @@ vos:
   train_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
       transforms:
+        - _target_: training.dataset.transforms.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          square: true
+          consistent_transform: True
+        - _target_: training.dataset.transforms.RandomAffine
+          degrees: 0
+          translate: [0.05, 0.05]
+          consistent_transform: True
         - _target_: training.dataset.transforms.RandomHorizontalFlip
           consistent_transform: True
         - _target_: training.dataset.transforms.RandomVerticalFlip
           consistent_transform: True
         - _target_: training.dataset.transforms.Random90DegreeRotation
           consistent_transform: True
-        - _target_: training.dataset.transforms.RandomResizeAPI
-          sizes: ${scratch.resolution}
-          square: true
-          consistent_transform: True
-        - _target_: training.dataset.transforms.ColorJitter
-          consistent_transform: True
-          brightness: 0.1
-          contrast: 0.03
-          saturation: 0.03
-          hue: null
         - _target_: training.dataset.transforms.ToTensorAPI
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
