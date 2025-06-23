@@ -154,6 +154,15 @@ def load_images(frames):
         if frame.data is None:
             # Load the frame rgb data from file
             path = frame.image_path
+            
+            # Check if this is a combined image frame
+            if hasattr(frame, 'load_combined_image') and path.startswith("COMBINED:"):
+                # Handle combined image loading
+                combined_image = frame.load_combined_image()
+                all_images.append(combined_image)
+                continue
+            
+            # Standard single image loading
             if path in cache:
                 all_images.append(deepcopy(all_images[cache[path]]))
                 continue

@@ -529,8 +529,20 @@ class Trainer:
             # Denormalize image for visualization
             img_viz = self._denormalize_image(img)
             
-            # Log original image
-            self.logger.log_image(f"Samples/{phase}/image", img_viz, step, dataformats='CHW')
+            # For combined images (3 channels), show only the last channel (topo_bf) for clarity
+            # For single image mode, show the image as-is
+            if img_viz.shape[0] == 3:
+                # Show only the last channel (blue/topo_bf) as grayscale
+                last_channel = img_viz[2:3]  # Keep channel dimension [1, H, W]
+                img_viz_display = last_channel.repeat(3, 1, 1)  # Convert to RGB for display
+            else:
+                # Single image mode - convert grayscale to RGB for consistent display
+                if img_viz.shape[0] == 1:
+                    img_viz_display = img_viz.repeat(3, 1, 1)
+                else:
+                    img_viz_display = img_viz
+                    
+            self.logger.log_image(f"Samples/{phase}/image", img_viz_display, step, dataformats='CHW')
             
             
             # Log ground truth mask if available
@@ -540,7 +552,7 @@ class Trainer:
                 
                 # Log mask overlay on image (red mask overlay) if enabled
                 if getattr(self.logging_conf, 'enable_mask_overlay', True):
-                    overlay_viz = self._create_overlay_visualization(img_viz, mask_viz)
+                    overlay_viz = self._create_overlay_visualization(img_viz_display, mask_viz)
                     self.logger.log_image(f"Samples/{phase}/image_with_mask_overlay", overlay_viz, step, dataformats='CHW')
             
             # Handle different output structures
@@ -574,12 +586,12 @@ class Trainer:
                         else:
                             pred_mask = pred_masks
                         
-                        pred_viz = self._prepare_mask_for_logging(pred_mask)
+                        pred_viz = self._prepare_mask_for_logging(pred_mask, binarize=False)
                         self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
                         
                         # Log predicted mask overlay on image (red mask overlay) if enabled
                         if getattr(self.logging_conf, 'enable_mask_overlay', True):
-                            pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                            pred_overlay_viz = self._create_overlay_visualization(img_viz_display, pred_viz)
                             self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
                         
                         pred_masks_found = True
@@ -618,12 +630,12 @@ class Trainer:
                                 else:
                                     pred_mask = pred_masks
                                 
-                                pred_viz = self._prepare_mask_for_logging(pred_mask)
+                                pred_viz = self._prepare_mask_for_logging(pred_mask, binarize=False)
                                 self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
                                 
                                 # Log predicted mask overlay on image (red mask overlay) if enabled
                                 if getattr(self.logging_conf, 'enable_mask_overlay', True):
-                                    pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                                    pred_overlay_viz = self._create_overlay_visualization(img_viz_display, pred_viz)
                                     self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
                                 
                                 return  # Exit early since we found and logged the mask
@@ -638,12 +650,12 @@ class Trainer:
                                 elif len(pred_mask.shape) == 3:  # [N, H, W]  
                                     pred_mask = pred_mask[0]  # [H, W]
                                 
-                                pred_viz = self._prepare_mask_for_logging(pred_mask)
+                                pred_viz = self._prepare_mask_for_logging(pred_mask, binarize=False)
                                 self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
                                 
                                 # Log predicted mask overlay on image (red mask overlay) if enabled
                                 if getattr(self.logging_conf, 'enable_mask_overlay', True):
-                                    pred_overlay_viz = self._create_overlay_visualization(img_viz, pred_viz)
+                                    pred_overlay_viz = self._create_overlay_visualization(img_viz_display, pred_viz)
                                     self.logger.log_image(f"Samples/{phase}/image_with_pred_overlay", pred_overlay_viz, step, dataformats='CHW')
                                 
                                 break
@@ -667,7 +679,7 @@ class Trainer:
                     else:
                         pred_mask = pred_masks
                     
-                    pred_viz = self._prepare_mask_for_logging(pred_mask)
+                    pred_viz = self._prepare_mask_for_logging(pred_mask, binarize=False)
                     self.logger.log_image(f"Samples/{phase}/pred_mask", pred_viz, step, dataformats='HW')
                     
                     # Log predicted mask overlay on image (red mask overlay) if enabled
@@ -687,7 +699,7 @@ class Trainer:
         # Clamp to valid range
         return torch.clamp(img_denorm, 0, 1)
 
-    def _prepare_mask_for_logging(self, mask: torch.Tensor) -> torch.Tensor:
+    def _prepare_mask_for_logging(self, mask: torch.Tensor, binarize=False, threshold=0.5) -> torch.Tensor:
         """Prepare mask tensor for logging."""
         if mask.dim() > 2:
             # Take the first mask if there are multiple
@@ -701,15 +713,20 @@ class Trainer:
             # Normalize to 0-1 range if needed
             if mask_viz.max() > 1:
                 mask_viz = mask_viz / mask_viz.max()
+        
+        # Binarize if requested (for predicted masks)
+        if binarize:
+            mask_viz = (mask_viz > threshold).float()
+            
         return mask_viz
 
-    def _create_overlay_visualization(self, img: torch.Tensor, mask: torch.Tensor, alpha=0.4) -> torch.Tensor:
+    def _create_overlay_visualization(self, img: torch.Tensor, mask: torch.Tensor, alpha=0.6) -> torch.Tensor:
         """Create an overlay of image and mask with red mask overlay for TensorBoard.
         
         Args:
             img: Image tensor of shape [C, H, W] in range [0, 1]
             mask: Mask tensor of shape [H, W] in range [0, 1]
-            alpha: Transparency of mask overlay (default: 0.4)
+            alpha: Transparency of mask overlay (default: 0.6)
             
         Returns:
             torch.Tensor: Image with red mask overlay of shape [C, H, W]
@@ -732,12 +749,23 @@ class Trainer:
                 import torch.nn.functional as F
                 mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=img.shape[-2:], mode='nearest').squeeze()
             
-            # Normalize mask to [0, 1] range
+            # Binarize mask: convert to 0 or 1 values with threshold
+            mask = mask.float()
             if mask.max() > 1:
-                mask = mask / mask.max()
+                mask = mask / mask.max()  # Normalize to [0, 1] first
+            # Apply threshold to create binary mask
+            mask = (mask > 0.0).float()
             
             # Convert mask to same device as image
             mask = mask.to(img.device)
+            
+            # Ensure image is properly denormalized and in [0, 1] range
+            if img.min() < -1 or img.max() > 2:
+                # Image appears to be normalized, denormalize it
+                img = self._denormalize_image(img)
+            else:
+                # Clamp to ensure valid range
+                img = torch.clamp(img, 0, 1)
             
             # Create overlay
             overlay = img.clone()
@@ -748,13 +776,14 @@ class Trainer:
             elif img.shape[0] != 3:
                 return img  # Unexpected number of channels
             
-            # Apply red mask overlay where mask is present
-            # Red color overlay: enhance red channel, reduce green and blue
-            overlay[0] = overlay[0] * (1 - alpha * mask) + alpha * mask  # Red channel enhanced
-            overlay[1] = overlay[1] * (1 - alpha * mask)  # Green channel dimmed
-            overlay[2] = overlay[2] * (1 - alpha * mask)  # Blue channel dimmed
+            # Apply bright red mask overlay where mask is present
+            # Use additive blending for stronger red color
+            red_mask = mask * alpha
+            overlay[0] = torch.clamp(overlay[0] + red_mask, 0, 1)  # Add red
+            overlay[1] = overlay[1] * (1 - red_mask * 0.8)  # Dim green more
+            overlay[2] = overlay[2] * (1 - red_mask * 0.8)  # Dim blue more
             
-            # Clamp values to [0, 1]
+            # Ensure final values are in [0, 1]
             overlay = torch.clamp(overlay, 0, 1)
             
             return overlay

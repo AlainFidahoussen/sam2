@@ -13,6 +13,8 @@ from iopath.common.file_io import g_pathmgr
 
 from training.dataset.vos_raw_dataset import VOSFrame, VOSRawDataset, VOSVideo
 from training.dataset.vos_segment_loader import MultiplePNGSegmentLoader
+from PIL import Image
+import numpy as np
 
 # Import visualization utilities
 try:
@@ -23,6 +25,76 @@ except ImportError:
     # If visualization utils are not available, disable bbox visualization
     create_training_visualization = None
     prepare_tensorboard_image = None
+
+
+class CombinedImageVOSFrame(VOSFrame):
+    """
+    Custom VOSFrame that combines multiple image types into RGB channels
+    """
+    def __init__(self, frame_idx, image_paths, combine_types):
+        """
+        Initialize frame with multiple image paths
+        
+        Args:
+            frame_idx: Frame index
+            image_paths: List of 3 image paths [R_path, G_path, B_path]
+            combine_types: List of 3 image types [R_type, G_type, B_type]
+        """
+        # Don't call super().__init__ to avoid setting single image_path
+        self.frame_idx = frame_idx
+        self.image_paths = image_paths
+        self.combine_types = combine_types
+        self.data = None  # Will be loaded when needed
+        
+    @property 
+    def image_path(self):
+        """
+        Override image_path property to handle combined loading
+        This property is accessed by the VOS dataset loading logic
+        """
+        return self._get_combined_image_path()
+        
+    def _get_combined_image_path(self):
+        """
+        Return a special identifier that the loading logic can recognize
+        """
+        return f"COMBINED:{':'.join(self.image_paths)}"
+        
+    def load_combined_image(self):
+        """
+        Load and combine the three images into RGB channels
+        Returns a PIL Image with combined channels
+        """
+        if self.data is not None:
+            return self.data
+            
+        try:
+            # Load all three images as grayscale
+            channels = []
+            for img_path in self.image_paths:
+                if not os.path.exists(img_path):
+                    raise FileNotFoundError(f"Image not found: {img_path}")
+                    
+                # Load as grayscale and convert to array
+                with g_pathmgr.open(img_path, "rb") as f:
+                    img = Image.open(f).convert('L')  # Convert to grayscale
+                    img_array = np.array(img)
+                    channels.append(img_array)
+            
+            # Stack the three grayscale images as RGB channels
+            combined_array = np.stack(channels, axis=2)  # Shape: (H, W, 3)
+            
+            # Convert back to PIL Image
+            combined_image = Image.fromarray(combined_array.astype(np.uint8), mode='RGB')
+            
+            # Cache the result
+            self.data = combined_image
+            return combined_image
+            
+        except Exception as e:
+            print(f"Error combining images {self.image_paths}: {e}")
+            # Fallback: create a blank RGB image
+            return Image.new('RGB', (512, 512), (0, 0, 0))
 
 
 class BrazilMaskRawDataset(VOSRawDataset):
@@ -40,11 +112,13 @@ class BrazilMaskRawDataset(VOSRawDataset):
         excluded_videos_list_txt=None,
         num_frames=1,
         image_type=None,
+        combine_images=None,
     ):
         self.img_folder = img_folder
         self.gt_folder = gt_folder
         self.num_frames = num_frames
         self.image_type = image_type
+        self.combine_images = combine_images
         
         # Load file mapping to understand sequential naming
         self.file_mapping = {}
@@ -96,31 +170,64 @@ class BrazilMaskRawDataset(VOSRawDataset):
         """
         case_id = self.case_ids[idx]
         
-        # Find sequential IDs for this case
+        # Initialize seq_ids_for_case to avoid UnboundLocalError
         seq_ids_for_case = []
-        for seq_id, mapping_info in self.file_mapping.items():
-            if mapping_info["case_id"] == case_id:
-                if self.image_type:
-                    # Check if this sequential ID has the preferred image type
-                    if mapping_info["image_type"] == self.image_type:
+        
+        # Handle different modes: single image type vs combined images
+        if self.combine_images:
+            # For combined images, we need to find seq_ids that have ALL required image types
+            seq_ids_by_type = {img_type: [] for img_type in self.combine_images}
+            
+            for seq_id, mapping_info in self.file_mapping.items():
+                if mapping_info["case_id"] == case_id:
+                    img_type = mapping_info["image_type"]
+                    if img_type in seq_ids_by_type:
+                        seq_ids_by_type[img_type].append(seq_id)
+                        seq_ids_for_case.append(seq_id)  # Track for segment loader
+            
+            # Check that we have all required image types
+            missing_types = []
+            for img_type in self.combine_images:
+                if not seq_ids_by_type[img_type]:
+                    missing_types.append(img_type)
+            
+            if missing_types:
+                raise ValueError(f"Case {case_id} missing image types: {missing_types}")
+            
+            # Use the first available seq_id for each type (they should have same case_id)
+            case_images = []
+            for img_type in self.combine_images:  # Maintain order: R, G, B
+                seq_id = seq_ids_by_type[img_type][0]  # Take first available
+                mapping_info = self.file_mapping[seq_id]
+                image_filename = f"{seq_id}_{mapping_info['image_type']}.png"
+                image_path = os.path.join(self.img_folder, image_filename)
+                if os.path.exists(image_path):
+                    case_images.append(image_path)
+        else:
+            # Original single image type logic
+            for seq_id, mapping_info in self.file_mapping.items():
+                if mapping_info["case_id"] == case_id:
+                    if self.image_type:
+                        # Check if this sequential ID has the preferred image type
+                        if mapping_info["image_type"] == self.image_type:
+                            seq_ids_for_case.append(seq_id)
+                    else:
                         seq_ids_for_case.append(seq_id)
+            
+            if not seq_ids_for_case:
+                if self.image_type:
+                    raise ValueError(f"No images found for case {case_id} with type {self.image_type}")
                 else:
-                    seq_ids_for_case.append(seq_id)
-        
-        if not seq_ids_for_case:
-            if self.image_type:
-                raise ValueError(f"No images found for case {case_id} with type {self.image_type}")
-            else:
-                raise ValueError(f"No images found for case {case_id}")
-        
-        # Build image paths using sequential naming
-        case_images = []
-        for seq_id in seq_ids_for_case:
-            mapping_info = self.file_mapping[seq_id]
-            image_filename = f"{seq_id}_{mapping_info['image_type']}.png"
-            image_path = os.path.join(self.img_folder, image_filename)
-            if os.path.exists(image_path):
-                case_images.append(image_path)
+                    raise ValueError(f"No images found for case {case_id}")
+            
+            # Build image paths using sequential naming
+            case_images = []
+            for seq_id in seq_ids_for_case:
+                mapping_info = self.file_mapping[seq_id]
+                image_filename = f"{seq_id}_{mapping_info['image_type']}.png"
+                image_path = os.path.join(self.img_folder, image_filename)
+                if os.path.exists(image_path):
+                    case_images.append(image_path)
         
         case_images = sorted(case_images)
         
@@ -130,11 +237,21 @@ class BrazilMaskRawDataset(VOSRawDataset):
             else:
                 raise ValueError(f"No images found for case {case_id}")
         
-        # For single image training, use the first available image
+        # Handle frame creation based on mode
         frames = []
-        for frame_idx in range(min(self.num_frames, len(case_images))):
-            image_path = case_images[frame_idx]
-            frames.append(VOSFrame(frame_idx, image_path=image_path))
+        if self.combine_images:
+            # For combined images, create a single frame that combines multiple image types
+            if len(case_images) != 3:
+                raise ValueError(f"Expected 3 images for combining, got {len(case_images)}")
+            
+            # Create a custom frame that will combine the images
+            frame = CombinedImageVOSFrame(0, image_paths=case_images, combine_types=self.combine_images)
+            frames.append(frame)
+        else:
+            # For single image training, use the first available image
+            for frame_idx in range(min(self.num_frames, len(case_images))):
+                image_path = case_images[frame_idx]
+                frames.append(VOSFrame(frame_idx, image_path=image_path))
         
         # Create video object
         video = VOSVideo(case_id, idx, frames)

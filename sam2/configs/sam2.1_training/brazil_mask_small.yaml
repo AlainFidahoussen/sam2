@@ -2,13 +2,13 @@
 
 # Brazil Mask SAM2 Training Configuration - Small Model
 scratch:
-  resolution: 512
-  train_batch_size: 8
+  resolution: 1024
+  train_batch_size: 16
   num_train_workers: 4
   num_frames: 1
   max_num_objects: 1
-  base_lr: 1.0e-5
-  vision_lr: 5.0e-6
+  base_lr: 5.0e-6
+  vision_lr: 2.5e-6
   phases_per_epoch: 1
   num_epochs: 100
 

@@ -7,10 +7,10 @@ scratch:
   num_train_workers: 4
   num_frames: 1
   max_num_objects: 1
-  base_lr: 1.0e-5
-  vision_lr: 5.0e-6
+  base_lr: 5.0e-6
+  vision_lr: 2.5e-6
   phases_per_epoch: 1
-  num_epochs: 1
+  num_epochs: 100
 
 dataset:
   # Absolute paths to Brazil mask dataset

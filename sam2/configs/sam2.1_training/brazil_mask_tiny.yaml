@@ -328,7 +328,7 @@ trainer:
       should_log: True
     log_dir: ${launcher.experiment_log_dir}/logs
     log_freq: 10
-    log_visual_frequency: 5
+    log_visual_frequency: 100
     log_scalar_frequency: 10
     enable_bbox_visualization: False
     enable_mask_overlay: True
